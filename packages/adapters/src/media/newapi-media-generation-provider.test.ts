@@ -42,7 +42,12 @@ describe("New API media generation", () => {
       MEDIA_GENERATION_BASE_URL: "https://gateway.example.test/",
     });
     expect(provider?.id).toBe("newapi");
-    expect(provider?.capabilities).toEqual({ images: true, video: false, offline: false });
+    expect(provider?.capabilities).toEqual({
+      images: true,
+      video: false,
+      offline: false,
+      references: 4,
+    });
   });
 
   it("generates an image and re-encodes the JPEG as PNG", async () => {
@@ -118,5 +123,40 @@ describe("New API media generation", () => {
     await expect(provider.pollVideo("../x", context)).rejects.toMatchObject({
       code: "invalid_input",
     });
+  });
+
+  it("sends reference images to the edit endpoint and the video task", async () => {
+    const png = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: "#ffffff" },
+    })
+      .png()
+      .toBuffer();
+    const gif = Buffer.from("R0lGODlhAQABAAAAACw=", "base64");
+    const { fetch, provider } = setup(
+      json({ data: [{ b64_json: png.toString("base64") }] }),
+      json({ id: "cgt-9" }),
+    );
+    expect(provider.capabilities.references).toBe(4);
+    const references = [{ bytes: png, mimeType: "image/png", name: "product.png" }];
+    await provider.generateImage({ prompt: "on a sofa", references }, context);
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe("https://gateway.example.test/v1/images/edits");
+    const form = init?.body as FormData;
+    expect(form).toBeInstanceOf(FormData);
+    expect(form.getAll("image")).toHaveLength(1);
+    expect(form.get("model")).toBe("doubao-seedream-5-0-260128");
+    expect(init?.headers).not.toHaveProperty("Content-Type");
+
+    await provider.generateVideo({ prompt: "slow pan", references }, context);
+    const body = JSON.parse(String(fetch.mock.calls[1]![1]?.body));
+    expect(body.content[1]).toMatchObject({ type: "image_url", role: "reference_image" });
+    expect(body.content[1].image_url.url).toMatch(/^data:image\/png;base64,/);
+
+    await expect(
+      provider.generateImage(
+        { prompt: "x", references: [{ bytes: gif, mimeType: "image/gif", name: "broken.gif" }] },
+        context,
+      ),
+    ).rejects.toMatchObject({ code: "invalid_input" });
   });
 });

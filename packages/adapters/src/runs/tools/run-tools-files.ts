@@ -52,6 +52,36 @@ async function artifactGroupId(ctx: RunContext): Promise<string | undefined> {
   return conversation?.groupId ?? undefined;
 }
 
+const ATTACHMENT_PATH = /^attachments\/([A-Za-z0-9_-]{1,100})(?:\.[a-z0-9]{1,8})?$/;
+
+/** Reads attached images named by their workspace path, scoped to the run's Space, without a computer. */
+function attachedImageLoader(ctx: RunContext) {
+  return async (paths: string[]) => {
+    const { deps, run, context } = ctx;
+    const artifacts = deps.artifacts;
+    if (!artifacts) throw new Error("Reference images are unavailable here.");
+    return Promise.all(
+      paths.map(async (path) => {
+        const id = ATTACHMENT_PATH.exec(path)?.[1];
+        const row = id
+          ? await deps.prisma.artifact.findFirst({
+              where: { id, spaceId: run.spaceId },
+              select: { id: true, name: true, mimeType: true, size: true },
+            })
+          : null;
+        if (!row) throw new Error(`Reference image not found: ${path}`);
+        if (!row.mimeType.startsWith("image/") || row.size > ATTACHMENT_MAX_BYTES)
+          throw new Error(`Reference is not a usable image: ${path}`);
+        return {
+          bytes: await artifacts.get(row.id, context),
+          mimeType: row.mimeType,
+          name: row.name,
+        };
+      }),
+    );
+  };
+}
+
 /** Generate an image or video, or with recoverOnly, only resume a job an earlier attempt started. */
 export async function callMediaTool(ctx: RunContext, call: ToolCall, recoverOnly = false) {
   const { deps, run, thread, context } = ctx;
@@ -73,6 +103,7 @@ export async function callMediaTool(ctx: RunContext, call: ToolCall, recoverOnly
     prisma: deps.prisma,
     context,
     run,
+    loadReferences: attachedImageLoader(ctx),
     threadGeneration: thread.historyCompactionGeneration,
     ...mediaDelivery({ ...deps, artifacts: deps.artifacts }, run, {
       providerId: mediaGeneration.id,

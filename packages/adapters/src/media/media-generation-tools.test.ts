@@ -274,4 +274,35 @@ describe("bot media tools", () => {
     expect(await generateMediaFromTool(options)).toHaveProperty("error");
     expect(attach).not.toHaveBeenCalled();
   });
+
+  it("passes reference images to a provider that accepts them, and only then reserves", async () => {
+    const { options, externalEffect, provider } = setup();
+    const refusing = await generateMediaFromTool({
+      ...options,
+      args: { prompt: "draw", references: ["attachments/a.png"] },
+    });
+    expect(refusing).toMatchObject({ error: expect.stringContaining("cannot use reference") });
+    expect(externalEffect.create).not.toHaveBeenCalled();
+
+    Object.assign(provider, { capabilities: { ...provider.capabilities, references: 4 } });
+    const missing = await generateMediaFromTool({
+      ...options,
+      args: { prompt: "draw", references: ["attachments/a.png"] },
+      loadReferences: vi.fn().mockRejectedValue(new Error("Reference image not found")),
+    });
+    expect(missing).toEqual({ error: "Reference image not found" });
+    expect(externalEffect.create).not.toHaveBeenCalled();
+
+    const generate = vi.spyOn(provider, "generateImage");
+    const reference = { bytes: new Uint8Array([1]), mimeType: "image/png", name: "a.png" };
+    await generateMediaFromTool({
+      ...options,
+      args: { prompt: "draw", references: ["attachments/a.png"] },
+      loadReferences: vi.fn().mockResolvedValue([reference]),
+    });
+    expect(generate).toHaveBeenCalledWith({ prompt: "draw", references: [reference] }, context);
+    expect(externalEffect.create.mock.calls[0]![0].data.request).toMatchObject({
+      references: ["attachments/a.png"],
+    });
+  });
 });

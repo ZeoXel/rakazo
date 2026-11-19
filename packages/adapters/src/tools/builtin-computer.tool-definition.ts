@@ -10,10 +10,19 @@ export const computerTools: ConnectorTool[] = [
   {
     name: "generate_image",
     description:
-      "Generate one image from a prompt and attach it to chat. Uses the deployment media model and may incur charges. Do not retry failed submissions automatically.",
+      "Generate one image from a prompt, optionally based on attached reference images, and attach it to chat. Uses the deployment media model and may incur charges. Do not retry failed submissions automatically.",
     inputSchema: {
       type: "object",
-      properties: { prompt: { type: "string", minLength: 1, maxLength: 4000 } },
+      properties: {
+        prompt: { type: "string", minLength: 1, maxLength: 4000 },
+        references: {
+          type: "array",
+          description:
+            "Up to 4 attached image paths (attachments/<id>.<ext>) for the model to work from, such as the user's product photo. Omit to generate from the prompt alone.",
+          items: { type: "string", minLength: 1, maxLength: 200 },
+          maxItems: 4,
+        },
+      },
       required: ["prompt"],
     },
     readOnly: false,
@@ -27,6 +36,13 @@ export const computerTools: ConnectorTool[] = [
       properties: {
         prompt: { type: "string", minLength: 1, maxLength: 4000 },
         jobId: { type: "string", minLength: 1, maxLength: 200 },
+        references: {
+          type: "array",
+          description:
+            "Up to 4 attached image paths (attachments/<id>.<ext>) for the model to work from, such as the user's product photo. Omit to generate from the prompt alone.",
+          items: { type: "string", minLength: 1, maxLength: 200 },
+          maxItems: 4,
+        },
       },
     },
     readOnly: false,

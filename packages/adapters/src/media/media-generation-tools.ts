@@ -1,7 +1,9 @@
 import type {
   AdapterContext,
   GeneratedMedia,
+  MediaGenerationInput,
   MediaGenerationProvider,
+  MediaReference,
   MediaVideoJob,
 } from "@rakazo/adapter-kit";
 import { MediaGenerationError } from "@rakazo/adapter-kit";
@@ -13,6 +15,7 @@ import { z } from "zod";
 import { mediaPromptSchema, validateGeneratedMedia } from "./media-generation-provider.js";
 
 export const MEDIA_JOB_KIND = "media_generation_job";
+const referencePaths = z.array(z.string().trim().min(1).max(200)).max(4).optional();
 const savedJob = z.object({
   provider: z.string(),
   jobId: z.string().optional(),
@@ -36,6 +39,8 @@ export async function generateMediaFromTool(options: {
     job: { id: string; result: { provider: string; jobId?: string } },
   ) => Promise<{ artifactId: string; block: MessageBlock }>;
   publish: (block: MessageBlock, jobId: string, artifactId: string) => Promise<unknown>;
+  /** Reads the attached images a call names; throws when one is unavailable or not an image. */
+  loadReferences?: (paths: string[]) => Promise<MediaReference[]>;
   /** Commits with a video's provider failure, so whatever follows it cannot be lost. */
   onSettled?: (tx: Prisma.TransactionClient, status: "failed") => Promise<void>;
 }) {
@@ -50,10 +55,23 @@ export async function generateMediaFromTool(options: {
         typeof args.jobId !== "string" ||
         !args.jobId ||
         args.jobId.length > 200 ||
-        args.prompt !== undefined)
+        args.prompt !== undefined ||
+        args.references !== undefined)
     ) {
       return { error: "Use a prompt to submit or jobId alone to poll a video." };
     }
+    const references = referencePaths.safeParse(args.references);
+    if (!references.success) return { error: "Pass at most 4 attached image paths as references." };
+    const paths = references.data ?? [];
+    if (paths.length > (provider.capabilities.references ?? 0))
+      return {
+        error: provider.capabilities.references
+          ? `This media model accepts at most ${provider.capabilities.references} reference images.`
+          : "This media model cannot use reference images; describe the product in the prompt instead.",
+      };
+    if (paths.length && !options.loadReferences)
+      return { error: "Reference images are unavailable here." };
+    let loaded: MediaReference[] | undefined;
     let reservation: ExternalEffect | null = null;
     let polling = false;
     if (video && typeof args.jobId === "string") {
@@ -108,6 +126,16 @@ export async function generateMediaFromTool(options: {
         if (options.recoverOnly) return undefined;
         const input = mediaPromptSchema.safeParse(args);
         if (!input.success) return { error: "A prompt of 1–4000 characters is required." };
+        // Read references before reserving, so an unreadable file never leaves a half-made job.
+        if (paths.length && options.loadReferences) {
+          try {
+            loaded = await options.loadReferences(paths);
+          } catch (error) {
+            return {
+              error: error instanceof Error ? error.message : "A reference image is unavailable.",
+            };
+          }
+        }
         // A unique slot makes the per-run cap durable even across concurrent calls/restarts.
         for (let slot = 0; slot < 2; slot++) {
           try {
@@ -121,6 +149,7 @@ export async function generateMediaFromTool(options: {
                 request: {
                   tool: options.name,
                   prompt: input.data.prompt,
+                  ...(paths.length ? { references: paths } : {}),
                   executionId: options.executionId,
                   ...(options.threadGeneration === undefined
                     ? {}
@@ -168,14 +197,18 @@ export async function generateMediaFromTool(options: {
       polling = true;
     }
     let output: MediaVideoJob | { status: "completed"; output: GeneratedMedia };
+    const submission = (): MediaGenerationInput => ({
+      ...mediaPromptSchema.parse(args),
+      ...(loaded?.length ? { references: loaded } : {}),
+    });
     try {
       output = video
         ? saved.jobId
           ? await provider.pollVideo(saved.jobId, context)
-          : await provider.generateVideo(mediaPromptSchema.parse(args), context)
+          : await provider.generateVideo(submission(), context)
         : {
             status: "completed" as const,
-            output: await provider.generateImage(mediaPromptSchema.parse(args), context),
+            output: await provider.generateImage(submission(), context),
           };
     } catch (error) {
       // Release only this check's claim; a finished or failed job stays settled.

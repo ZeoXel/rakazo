@@ -8,7 +8,6 @@ import type {
 import { MediaGenerationError } from "@rakazo/adapter-kit";
 import { ATTACHMENT_MAX_BYTES } from "@rakazo/contracts";
 import { deadlineSignal, ResponseTooLargeError } from "@rakazo/core";
-import sharp from "sharp";
 import { z } from "zod";
 import type { ResolveHostname } from "../web/web-ssrf.js";
 import { fetchSafeWebBytes } from "../web/web-ssrf.js";
@@ -37,6 +36,9 @@ export type NewApiMediaOptions = {
   resolveHostname?: ResolveHostname;
 };
 
+const loadSharp = async () => (await import("sharp")).default;
+const MAX_REFERENCES = 4;
+const REFERENCE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MODEL = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/;
 const TASK_ID = /^[a-zA-Z0-9_.:-]{1,200}$/;
 const imageResponse = z.object({
@@ -70,6 +72,7 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
       images: Boolean(options.imageModel),
       video: Boolean(options.videoModel),
       offline: false,
+      references: MAX_REFERENCES,
     };
   }
 
@@ -86,10 +89,10 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
         method: body ? "POST" : "GET",
         headers: {
           Authorization: `Bearer ${this.options.apiKey}`,
-          ...(body ? { "Content-Type": "application/json" } : {}),
+          ...(body && !(body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
         },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(timeoutMs)]),
+        body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
+        signal: deadlineSignal(timeoutMs, context.signal),
         redirect: "error",
       });
     } catch {
@@ -115,10 +118,27 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
     }
   }
 
+  /** Reference images the model accepts; anything else is re-encoded to PNG. */
+  private async references(input: MediaGenerationInput) {
+    const refs = input.references ?? [];
+    if (refs.length > MAX_REFERENCES) throw new MediaGenerationError("invalid_input");
+    return Promise.all(
+      refs.map(async (ref) => {
+        if (REFERENCE_TYPES.has(ref.mimeType)) return ref;
+        try {
+          const bytes = await (await loadSharp())(ref.bytes).png().toBuffer();
+          return { ...ref, bytes, mimeType: "image/png" };
+        } catch {
+          throw new MediaGenerationError("invalid_input");
+        }
+      }),
+    );
+  }
+
   /** Rakazo attachments are PNG; Seedream returns JPEG. Re-encode and keep under the limit. */
   private async toPng(bytes: Uint8Array): Promise<GeneratedMedia> {
     for (const side of [2048, 1536, 1024]) {
-      const png = await sharp(bytes)
+      const png = await (await loadSharp())(bytes)
         .resize({ width: side, height: side, fit: "inside", withoutEnlargement: true })
         .png({ compressionLevel: 9 })
         .toBuffer();
@@ -160,19 +180,34 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
     const parsed = mediaPromptSchema.safeParse(input);
     if (!parsed.success) throw new MediaGenerationError("invalid_input");
     context = { ...context, signal: deadlineSignal(180_000, context.signal) };
+    const refs = await this.references(input);
+    const fields = {
+      model,
+      prompt: parsed.data.prompt,
+      n: 1,
+      size: this.options.imageSize ?? "2K",
+      response_format: "b64_json",
+      // Seedream adds a visible mark unless told not to; disclosure is handled by the product.
+      ...(/seedream/i.test(model) ? { watermark: false } : {}),
+    };
+    let body: unknown = fields;
+    if (refs.length) {
+      // With references the gateway's edit endpoint takes the images as repeated `image` parts.
+      const form = new FormData();
+      for (const ref of refs)
+        form.append(
+          "image",
+          new Blob([new Uint8Array(ref.bytes)], { type: ref.mimeType }),
+          ref.name,
+        );
+      for (const [key, value] of Object.entries(fields)) form.set(key, String(value));
+      body = form;
+    }
     const result = imageResponse.safeParse(
       await this.call(
-        "/v1/images/generations",
+        refs.length ? "/v1/images/edits" : "/v1/images/generations",
         context,
-        {
-          model,
-          prompt: parsed.data.prompt,
-          n: 1,
-          size: this.options.imageSize ?? "2K",
-          response_format: "b64_json",
-          // Seedream adds a visible mark unless told not to; disclosure is handled by the product.
-          ...(/seedream/i.test(model) ? { watermark: false } : {}),
-        },
+        body,
         170_000,
       ),
     );
@@ -201,13 +236,23 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
     if (!model) throw new MediaGenerationError("unsupported");
     const parsed = mediaPromptSchema.safeParse(input);
     if (!parsed.success) throw new MediaGenerationError("invalid_input");
+    const refs = await this.references(input);
     const job = videoSubmit.safeParse(
       await this.call(
         "/doubao/api/v3/contents/generations/tasks",
         context,
         {
           model,
-          content: [{ type: "text", text: parsed.data.prompt }],
+          content: [
+            { type: "text", text: parsed.data.prompt },
+            ...refs.map((ref) => ({
+              type: "image_url",
+              role: "reference_image",
+              image_url: {
+                url: `data:${ref.mimeType};base64,${Buffer.from(ref.bytes).toString("base64")}`,
+              },
+            })),
+          ],
           ratio: this.options.videoRatio ?? "16:9",
           duration: this.options.videoDuration ?? 5,
           resolution: this.options.videoResolution ?? "720p",

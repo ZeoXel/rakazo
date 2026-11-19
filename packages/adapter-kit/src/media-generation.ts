@@ -1,6 +1,8 @@
 import type { AdapterContext } from "./types.js";
 
-export type MediaGenerationInput = { prompt: string };
+/** An image the user supplied (a product photo, a style sample) for the model to work from. */
+export type MediaReference = { bytes: Uint8Array; mimeType: string; name: string };
+export type MediaGenerationInput = { prompt: string; references?: MediaReference[] };
 export type GeneratedMedia = {
   bytes: Uint8Array;
   mimeType: "image/png" | "video/mp4";
@@ -11,7 +13,13 @@ export type MediaVideoJob =
   | { id: string; status: "failed" };
 export interface MediaGenerationProvider {
   readonly id: string;
-  readonly capabilities: { images: boolean; video: boolean; offline: boolean };
+  readonly capabilities: {
+    images: boolean;
+    video: boolean;
+    offline: boolean;
+    /** Most reference images one request accepts; absent or 0 means prompt only. */
+    references?: number;
+  };
   generateImage(input: MediaGenerationInput, context: AdapterContext): Promise<GeneratedMedia>;
   generateVideo(input: MediaGenerationInput, context: AdapterContext): Promise<MediaVideoJob>;
   pollVideo(id: string, context: AdapterContext): Promise<MediaVideoJob>;
