@@ -1,4 +1,5 @@
 import type { AdapterContext } from "@rakazo/adapter-kit";
+import { MediaGenerationError } from "@rakazo/adapter-kit";
 import { ATTACHMENT_MAX_BYTES } from "@rakazo/contracts";
 import { toolRequiresApproval } from "@rakazo/core";
 import type { PrismaClient } from "@rakazo/db";
@@ -28,6 +29,7 @@ function setup() {
       .mockResolvedValue({ ...row, status: "media_submitting", result: { provider: "fake" } }),
     update: vi.fn().mockResolvedValue(row),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
   };
   const attach = vi.fn().mockResolvedValue({
     artifactId: "artifact",
@@ -112,6 +114,19 @@ describe("bot media tools", () => {
     });
     expect(externalEffect.create).toHaveBeenCalledTimes(2);
     expect(generate).not.toHaveBeenCalled();
+  });
+  it("gives back the slot of a submission the provider refused, and only that", async () => {
+    const { options, externalEffect, provider } = setup();
+    const generate = vi.spyOn(provider, "generateImage");
+    generate.mockRejectedValueOnce(new MediaGenerationError("provider_failure", true));
+    expect(await generateMediaFromTool(options)).toHaveProperty("error");
+    expect(externalEffect.deleteMany).toHaveBeenCalledWith({
+      where: { id: "local-job", status: "media_submitting" },
+    });
+    externalEffect.deleteMany.mockClear();
+    generate.mockRejectedValueOnce(new MediaGenerationError("provider_failure"));
+    expect(await generateMediaFromTool(options)).toHaveProperty("error");
+    expect(externalEffect.deleteMany).not.toHaveBeenCalled();
   });
   it("does not rebill a replayed execution", async () => {
     const { options, externalEffect, row, provider } = setup();

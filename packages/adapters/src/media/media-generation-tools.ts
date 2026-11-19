@@ -211,6 +211,11 @@ export async function generateMediaFromTool(options: {
             output: await provider.generateImage(submission(), context),
           };
     } catch (error) {
+      // A submission the provider refused started nothing, so it gives its slot back.
+      if (!polling && !saved.jobId && error instanceof MediaGenerationError && error.refused)
+        await prisma.externalEffect.deleteMany({
+          where: { id: reservation.id, status: "media_submitting" },
+        });
       // Release only this check's claim; a finished or failed job stays settled.
       if (polling)
         await prisma.externalEffect.updateMany({

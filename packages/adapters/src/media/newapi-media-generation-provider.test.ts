@@ -81,7 +81,14 @@ describe("New API media generation", () => {
     ).rejects.toMatchObject({ code: "authentication" });
     await expect(
       setup(json({}, 429)).provider.generateImage({ prompt: "x" }, context),
-    ).rejects.toMatchObject({ code: "rate_limit" });
+    ).rejects.toMatchObject({ code: "rate_limit", refused: true });
+    // A model the upstream account lacks is refused; a server error may have started work.
+    await expect(
+      setup(json({}, 404)).provider.generateImage({ prompt: "x" }, context),
+    ).rejects.toMatchObject({ code: "provider_failure", refused: true });
+    await expect(
+      setup(json({}, 500)).provider.generateImage({ prompt: "x" }, context),
+    ).rejects.toMatchObject({ code: "provider_failure", refused: false });
   });
 
   it("submits a video task and polls it to completion", async () => {

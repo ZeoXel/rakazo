@@ -109,6 +109,8 @@ export class NewApiMediaGenerationProvider implements MediaGenerationProvider {
             : [400, 422].includes(response.status)
               ? "invalid_input"
               : "provider_failure",
+        // A 4xx answer, or a gateway with no channel for the model, means nothing was started.
+        (response.status >= 400 && response.status < 500) || response.status === 503,
       );
     }
     try {

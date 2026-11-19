@@ -32,7 +32,14 @@ export type MediaGenerationErrorCode =
   | "provider_failure"
   | "output_limit";
 export class MediaGenerationError extends Error {
-  constructor(public readonly code: MediaGenerationErrorCode) {
+  /**
+   * @param refused the provider answered that it did not take the request (nothing was started
+   * or billed), so the caller may give back the submission it counted for it.
+   */
+  constructor(
+    public readonly code: MediaGenerationErrorCode,
+    public readonly refused = false,
+  ) {
     super(`Media generation: ${code}`);
     this.name = "MediaGenerationError";
   }
